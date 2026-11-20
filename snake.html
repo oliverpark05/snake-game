@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake</title>
+<style>
+  :root {
+    --bg: #030803;
+    --panel: #061406;
+    --green: #39ff6a;
+    --mid: #1fa845;
+    --dim: #0f4a1e;
+    --amber: #d8ff5a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--green);
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+  }
+  .game { width: min(94vw, 440px); }
+  h1 {
+    margin: 0 0 10px;
+    font-size: 1.6rem;
+    letter-spacing: 0.35em;
+    font-weight: 700;
+    text-shadow: 0 0 8px rgba(57,255,106,.55);
+  }
+  .scores {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    font-size: 1.05rem;
+  }
+  .scores b { font-weight: 700; }
+  .screen {
+    border: 2px solid var(--mid);
+    background: var(--panel);
+    padding: 6px;
+    box-shadow: 0 0 18px rgba(57,255,106,.18) inset, 0 0 14px rgba(57,255,106,.12);
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    image-rendering: pixelated;
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  button {
+    flex: 1;
+    font: inherit;
+    font-size: 1rem;
+    color: var(--green);
+    background: transparent;
+    border: 2px solid var(--green);
+    padding: 10px 6px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--green); color: var(--bg); }
+  button:focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
+  button:disabled { color: var(--dim); border-color: var(--dim); cursor: not-allowed; }
+  .help {
+    margin: 12px 0 0;
+    font-size: 0.9rem;
+    color: var(--mid);
+    line-height: 1.5;
+  }
+  .sr { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+<main class="game">
+  <h1>SNAKE</h1>
+  <div class="scores">
+    <span>Score <b id="score">0</b></span>
+    <span>High score <b id="high">0</b></span>
+  </div>
+  <div class="screen">
+    <canvas id="board" width="400" height="400" aria-label="Snake game board"></canvas>
+  </div>
+  <div class="controls">
+    <button id="startBtn" type="button">Start</button>
+    <button id="pauseBtn" type="button" disabled>Pause</button>
+    <button id="restartBtn" type="button">Restart</button>
+  </div>
+  <p class="help">Steer with W A S D. Space pauses. Eat food for 1 point. Grab the flashing bonus for 5 before it vanishes. Walls wrap around to the other side, but hitting your own tail ends the run.</p>
+  <div id="status" class="sr" aria-live="polite"></div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var GRID = 20;
+  var CELL = 20;                // 20 x 20 cells on a 400 x 400 canvas
+  var TICK_MS = 110;            // fixed speed
+  var BONUS_POINTS = 5;
+  var BONUS_TICKS = 45;         // about 5 seconds
+  var BONUS_CHANCE = 0.25;      // chance after eating regular food
+  var STORAGE_KEY = "snake-high-score";
+
+  var canvas = document.getElementById("board");
+  var ctx = canvas.getContext("2d");
+  var scoreEl = document.getElementById("score");
+  var highEl = document.getElementById("high");
+  var statusEl = document.getElementById("status");
+  var startBtn = document.getElementById("startBtn");
+  var pauseBtn = document.getElementById("pauseBtn");
+  var restartBtn = document.getElementById("restartBtn");
+
+  var COLORS = {
+    bg: "#061406",
+    grid: "#0a2410",
+    head: "#b6ffc9",
+    body: "#39ff6a",
+    food: "#39ff6a",
+    bonus: "#d8ff5a",
+    text: "#39ff6a"
+  };
+
+  var state = "idle";           // idle | running | paused | over
+  var snake, dir, queue, food, bonus, score, high, timer, tickCount, newRecord;
+
+  function loadHigh() {
+    try {
+      var v = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+      return isNaN(v) ? 0 : v;
+    } catch (e) { return 0; }
+  }
+  function saveHigh(v) {
+    try { localStorage.setItem(STORAGE_KEY, String(v)); } catch (e) { /* storage unavailable */ }
+  }
+
+  function say(msg) { statusEl.textContent = msg; }
+
+  function reset() {
+    var mid = Math.floor(GRID / 2);
+    snake = [{ x: mid, y: mid }, { x: mid - 1, y: mid }, { x: mid - 2, y: mid }];
+    dir = { x: 1, y: 0 };
+    queue = [];
+    score = 0;
+    bonus = null;
+    tickCount = 0;
+    newRecord = false;
+    food = null;
+    food = randomFreeCell();
+    updateScore();
+  }
+
+  function updateScore() {
+    scoreEl.textContent = score;
+    highEl.textContent = high;
+  }
+
+  function isOccupied(x, y) {
+    var i;
+    for (i = 0; i < snake.length; i++) {
+      if (snake[i].x === x && snake[i].y === y) return true;
+    }
+    if (food && food.x === x && food.y === y) return true;
+    if (bonus && bonus.x === x && bonus.y === y) return true;
+    return false;
+  }
+
+  function randomFreeCell() {
+    var free = [];
+    var x, y;
+    for (y = 0; y < GRID; y++) {
+      for (x = 0; x < GRID; x++) {
+        if (!isOccupied(x, y)) free.push({ x: x, y: y });
+      }
+    }
+    if (!free.length) return null;
+    return free[Math.floor(Math.random() * free.length)];
+  }
+
+  function setButtons() {
+    startBtn.disabled = state === "running" || state === "paused";
+    pauseBtn.disabled = state !== "running" && state !== "paused";
+    pauseBtn.textContent = state === "paused" ? "Resume" : "Pause";
+  }
+
+  function start() {
+    if (state === "running" || state === "paused") return;
+    reset();
+    state = "running";
+    run();
+    setButtons();
+    say("Game started");
+    draw();
+  }
+
+  function restart() {
+    stop();
+    reset();
+    state = "running";
+    run();
+    setButtons();
+    say("Game restarted");
+    draw();
+  }
+
+  function run() {
+    stop();
+    timer = setInterval(tick, TICK_MS);
+  }
+
+  function stop() {
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  function togglePause() {
+    if (state === "running") {
+      state = "paused";
+      stop();
+      say("Paused");
+    } else if (state === "paused") {
+      state = "running";
+      run();
+      say("Resumed");
+    } else {
+      return;
+    }
+    setButtons();
+    draw();
+  }
+
+  function gameOver() {
+    stop();
+    state = "over";
+    if (score > high) {
+      high = score;
+      newRecord = true;
+      saveHigh(high);
+    }
+    updateScore();
+    setButtons();
+    say("Game over. Score " + score + (newRecord ? ". New high score." : ""));
+    draw();
+  }
+
+  function tick() {
+    // apply the next queued turn, if any
+    if (queue.length) dir = queue.shift();
+
+    var head = snake[0];
+    var nx = (head.x + dir.x + GRID) % GRID;
+    var ny = (head.y + dir.y + GRID) % GRID;
+
+    var willEat = food && nx === food.x && ny === food.y;
+    var willEatBonus = bonus && nx === bonus.x && ny === bonus.y;
+
+    // the tail cell frees up this tick unless the snake is growing
+    var checkLen = willEat || willEatBonus ? snake.length : snake.length - 1;
+    var i;
+    for (i = 0; i < checkLen; i++) {
+      if (snake[i].x === nx && snake[i].y === ny) { gameOver(); return; }
+    }
+
+    snake.unshift({ x: nx, y: ny });
+
+    if (willEat) {
+      score += 1;
+      food = null;
+      food = randomFreeCell();
+      if (!bonus && Math.random() < BONUS_CHANCE) {
+        bonus = randomFreeCell();
+        if (bonus) bonus.ticks = BONUS_TICKS;
+      }
+    } else if (willEatBonus) {
+      score += BONUS_POINTS;
+      bonus = null;
+    } else {
+      snake.pop();
+    }
+
+    if (bonus) {
+      bonus.ticks -= 1;
+      if (bonus.ticks <= 0) bonus = null;
+    }
+
+    tickCount += 1;
+    if (!food) { gameOver(); return; }   // board completely full
+    updateScore();
+    draw();
+  }
+
+  function drawCell(x, y, color, inset) {
+    var p = inset || 1;
+    ctx.fillStyle = color;
+    ctx.fillRect(x * CELL + p, y * CELL + p, CELL - p * 2, CELL - p * 2);
+  }
+
+  function centerText(text, y, size) {
+    ctx.fillStyle = COLORS.text;
+    ctx.font = "bold " + size + "px 'Courier New', Courier, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(text, canvas.width / 2, y);
+  }
+
+  function dimBoard() {
+    ctx.fillStyle = "rgba(3, 8, 3, 0.78)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function draw() {
+    var x, y, i;
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // faint grid dots for the LCD feel
+    ctx.fillStyle = COLORS.grid;
+    for (y = 0; y < GRID; y++) {
+      for (x = 0; x < GRID; x++) {
+        ctx.fillRect(x * CELL + CELL / 2 - 1, y * CELL + CELL / 2 - 1, 2, 2);
+      }
+    }
+
+    if (food) drawCell(food.x, food.y, COLORS.food, 4);
+
+    if (bonus) {
+      // flash faster as time runs out
+      var fast = bonus.ticks < 15;
+      var on = fast ? (bonus.ticks % 2 === 0) : (Math.floor(bonus.ticks / 3) % 2 === 0);
+      if (on) drawCell(bonus.x, bonus.y, COLORS.bonus, 1);
+      else drawCell(bonus.x, bonus.y, COLORS.bonus, 5);
+    }
+
+    for (i = snake.length - 1; i >= 0; i--) {
+      drawCell(snake[i].x, snake[i].y, i === 0 ? COLORS.head : COLORS.body, 1);
+    }
+
+    if (state === "idle") {
+      dimBoard();
+      centerText("SNAKE", 180, 40);
+      centerText("Press Start", 220, 20);
+    } else if (state === "paused") {
+      dimBoard();
+      centerText("PAUSED", 195, 36);
+      centerText("Space or Resume to continue", 228, 16);
+    } else if (state === "over") {
+      dimBoard();
+      centerText("GAME OVER", 170, 38);
+      centerText("Score " + score, 208, 22);
+      if (newRecord) centerText("New high score!", 244, 24);
+      else centerText("Press Restart to play again", 244, 16);
+    }
+  }
+
+  function turn(nd) {
+    if (state !== "running") return;
+    var last = queue.length ? queue[queue.length - 1] : dir;
+    // ignore reversals and repeats
+    if (nd.x === -last.x && nd.y === -last.y) return;
+    if (nd.x === last.x && nd.y === last.y) return;
+    if (queue.length < 2) queue.push(nd);
+  }
+
+  document.addEventListener("keydown", function (e) {
+    var k = e.key;
+    if (k === " " || k === "Spacebar") {
+      e.preventDefault();
+      togglePause();
+      return;
+    }
+    switch (k.toLowerCase()) {
+      case "w": turn({ x: 0, y: -1 }); break;
+      case "s": turn({ x: 0, y: 1 }); break;
+      case "a": turn({ x: -1, y: 0 }); break;
+      case "d": turn({ x: 1, y: 0 }); break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  function wire(btn, fn) {
+    btn.addEventListener("click", function () {
+      fn();
+      btn.blur();     // keep Space for pause, not for re-clicking the button
+    });
+  }
+  wire(startBtn, start);
+  wire(pauseBtn, togglePause);
+  wire(restartBtn, restart);
+
+  high = loadHigh();
+  reset();
+  setButtons();
+  draw();
+})();
+</script>
+</body>
+</html>
